@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: The AWS CloudFormation template for this Serverless application
+Parameters:
+  dzName:
+    Type: String
+Resources:
+  dzBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref dzName
+  WorkerLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: /aws/lambda/redlock-rollout-worker
+  ProcessLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: /aws/lambda/redlock-rollout-process
+  IamRoleLambdaExecution:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Join 
+            - '-'
+            - - dev
+              - redlock-rollout
+              - lambda
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/redlock-rollout-worker:*
+                  - !Sub >-
+                    arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/redlock-rollout-process:*
+              - Effect: Allow
+                Action:
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub >-
+                    arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/redlock-rollout-worker:*:*
+                  - !Sub >-
+                    arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/redlock-rollout-process:*:*
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: 'arn:aws:lambda:*:*:function:redlock-rollout-process'
+              - Effect: Allow
+                Action:
+                  - 'sqs:GetQueueAttributes'
+                  - 'sqs:DeleteMessage'
+                  - 'sqs:ReceiveMessage'
+                Resource: 'arn:aws:sqs:*:*:redlock-rollout-messages'
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:PutObjectAcl'
+                Resource: 
+                  - !Join ['', ['arn:aws:s3:::', !Ref 'dzBucket']]
+                  - !Join ['', ['arn:aws:s3:::', !Ref 'dzBucket', /*]]
+
+      Path: /
+      RoleName: !Join 
+        - '-'
+        - - redlock-rollout
+          - dev
+          - us-east-1
+          - lambdaRole
+  WorkerLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: redlock-rollout-dev-serverlessdeploymentbucket-1qqz3asqpuwjb
+        S3Key: >-
+          serverless/redlock-rollout/dev/1532048359009-2018-07-20T00:59:19.009Z/redlock-rollout.zip
+      FunctionName: redlock-rollout-worker
+      Handler: functions/worker.handler
+      MemorySize: 128
+      Role: !GetAtt 
+        - IamRoleLambdaExecution
+        - Arn
+      Runtime: nodejs8.10
+      Timeout: 10
+      Environment:
+        Variables:
+          process: redlock-rollout-process
+          sqs: redlock-rollout-messages
+    DependsOn:
+      - WorkerLogGroup
+      - IamRoleLambdaExecution
+  ProcessLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: redlock-rollout-dev-serverlessdeploymentbucket-1qqz3asqpuwjb
+        S3Key: >-
+          serverless/redlock-rollout/dev/1532048359009-2018-07-20T00:59:19.009Z/redlock-rollout.zip
+      FunctionName: redlock-rollout-process
+      Handler: functions/process.handler
+      MemorySize: 128
+      Role: !GetAtt 
+        - IamRoleLambdaExecution
+        - Arn
+      Runtime: nodejs8.10
+      Timeout: 60
+      Environment:
+        Variables:
+          sqs: redlock-rollout-messages
+          bucket: !Ref dzName
+    DependsOn:
+      - ProcessLogGroup
+      - IamRoleLambdaExecution
+      - dzBucket
+  WorkerEventsRuleSchedule1:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 
+            - WorkerLambdaFunction
+            - Arn
+          Id: workerSchedule
+  WorkerLambdaPermissionEventsRuleSchedule1:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - WorkerLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: !Join 
+        - ''
+        - - events.
+          - !Ref 'AWS::URLSuffix'
+      SourceArn: !GetAtt 
+        - WorkerEventsRuleSchedule1
+        - Arn
+  Messages:
+    Type: 'AWS::SQS::Queue'
+    Properties:
+      QueueName: redlock-rollout-messages
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt 
+          - MessagesDeadLetterQueue
+          - Arn
+        maxReceiveCount: 10
+  MessagesDeadLetterQueue:
+    Type: 'AWS::SQS::Queue'
+    Properties:
+      QueueName: redlock-rollout-messages-dead-letter-queue
+      MessageRetentionPeriod: 1209600
